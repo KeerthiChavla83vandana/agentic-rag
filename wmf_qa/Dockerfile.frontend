@@ -1,0 +1,25 @@
+FROM python:3.13-slim
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install uv package manager
+COPY --from=ghcr.io/astral-sh/uv:0.5.21 /uv /uvx /bin/
+
+WORKDIR /workspace
+
+# Copy wmf_qa project folder
+COPY . .
+
+# Sync dependencies using uv
+RUN uv sync --frozen
+
+# Expose Streamlit port
+EXPOSE 8501
+
+ENV PYTHONUNBUFFERED=1
+
+# Command to run streamlit
+CMD ["uv", "run", "streamlit", "run", "streamlit_app.py", "--server.port=8501", "--server.address=0.0.0.0"]

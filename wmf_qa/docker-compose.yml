@@ -1,0 +1,137 @@
+# =============================================================================
+# WMF QA — Docker Compose Service Definitions
+# =============================================================================
+#
+# Services:
+#   wmf_qa_db       — PostgreSQL 14 with pgvector extension
+#   wmf_qa_backend  — FastAPI async backend (RAG pipeline)
+#   wmf_qa_frontend — Streamlit frontend (UI + debug panel)
+#
+# Startup Order:
+#   wmf_qa_db (health-checked) → wmf_qa_backend → wmf_qa_frontend
+#
+# Ports exposed to host:
+#   5433  → PostgreSQL (mapped from container 5432, avoids conflict with host PG)
+#   8001  → FastAPI backend
+#   8501  → Streamlit frontend
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL + pgvector
+  # ---------------------------------------------------------------------------
+  wmf_qa_db:
+    image: pgvector/pgvector:pg14   # Official pgvector image — has vector extension pre-installed
+    container_name: wmf_qa_db
+    ports:
+      - "5433:5432"                 # Host 5433 → Container 5432 (avoids conflict with local PG)
+    environment:
+      POSTGRES_DB: wmf_ip_qa
+      POSTGRES_USER: wmf_user
+      POSTGRES_PASSWORD: secure_password
+    volumes:
+      - wmf_qa_pgdata:/var/lib/postgresql/data   # Persist DB data across container restarts
+
+      # Mount the DDL SQL file as a PostgreSQL init script.
+      # Files in /docker-entrypoint-initdb.d/ are executed automatically when the
+      # DB volume is first created (i.e. on first `docker-compose up`).
+      # This ensures the schema is set up even before the backend starts.
+      # NOTE: This runs only once (when the volume is fresh). After that,
+      # the backend's lifespan startup handles table/index creation idempotently.
+      - ./sql/ddl/document_chunks.sql:/docker-entrypoint-initdb.d/01_init_schema.sql:ro
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wmf_user -d wmf_ip_qa"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # FastAPI Async Backend
+  # ---------------------------------------------------------------------------
+  wmf_qa_backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: wmf_qa_backend
+    ports:
+      - "8001:8000"                 # Host 8001 → Container 8000
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    environment:
+      # Database connection (uses Docker internal network hostname 'wmf_qa_db')
+      - DATABASE_HOST=wmf_qa_db
+      - DATABASE_PORT=5432
+      - DATABASE_NAME=wmf_ip_qa
+      - DATABASE_USER=wmf_user
+      - DATABASE_PASSWORD=secure_password
+
+      # Embedding model — must match the model baked into the Docker image
+      - EMBEDDING_MODEL_NAME=BAAI/bge-m3
+
+      # HuggingFace cache directory — must match HF_HOME set in Dockerfile.backend
+      # This ensures the pre-downloaded model is found at runtime.
+      - HF_HOME=/workspace/.cache/huggingface
+
+      # Disable HuggingFace telemetry (optional, privacy preference)
+      - HF_HUB_DISABLE_TELEMETRY=1
+
+      # LLM Provider settings
+      - LLM_PROVIDER=nvidia
+      - NVIDIA_API_KEY=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
+      - NVIDIA_MODEL_NAME=meta/llama-3.2-11b-vision-instruct
+
+    volumes:
+      - ./data:/workspace/data      # Persist uploaded files across restarts
+      - ./app:/workspace/app        # Live code updates from host
+
+    env_file:
+      - .env                        # Loads GEMINI_API_KEY and other secrets
+
+    depends_on:
+      wmf_qa_db:
+        condition: service_healthy  # Wait for DB health check to pass before starting
+
+  # ---------------------------------------------------------------------------
+  # Database Visualizer (pgAdmin 4)
+  # ---------------------------------------------------------------------------
+  wmf_qa_db_ui:
+    image: dpage/pgadmin4
+    container_name: wmf_qa_db_ui
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "8080:80"
+    depends_on:
+      - wmf_qa_db
+
+  # ---------------------------------------------------------------------------
+  # Streamlit Frontend
+  # ---------------------------------------------------------------------------
+  wmf_qa_frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: wmf_qa_frontend
+    ports:
+      - "8501:8501"                 # Streamlit default port
+    environment:
+      # Points to the backend using Docker internal hostname, not localhost
+      - BACKEND_URL=http://wmf_qa_backend:8000
+    volumes:
+      - ./data:/workspace/data
+    env_file:
+      - .env
+    depends_on:
+      - wmf_qa_backend
+
+# =============================================================================
+# Named Volumes
+# =============================================================================
+volumes:
+  wmf_qa_pgdata:
+    # Named volume for PostgreSQL data persistence.
+    # Data survives `docker-compose down` but is removed by `docker-compose down -v`.

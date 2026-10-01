@@ -1,0 +1,59 @@
+[project]
+name = "wmf-qa-platform"
+version = "0.1.0"
+description = "Standalone FPO Intelligence Platform QA RAG Prototype — Vrutti / Walmart Foundation"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    # -------------------------------------------------------------------------
+    # Web Framework & Server
+    # -------------------------------------------------------------------------
+    "fastapi>=0.139.0", # async-first web framework
+    "uvicorn>=0.49.0", # ASGI server for FastAPI
+    # -------------------------------------------------------------------------
+    # Database — PostgreSQL + pgvector
+    # -------------------------------------------------------------------------
+    "sqlalchemy>=2.0.51", # ORM with async extension (asyncio support)
+    "asyncpg>=0.29.0", # Async PostgreSQL driver (used by SQLAlchemy async engine)
+    "psycopg[binary]>=3.3.4", # Sync PostgreSQL driver (kept for Alembic / migrations)
+    "pgvector>=0.2.0", # pgvector SQLAlchemy integration (Vector column type)
+    # -------------------------------------------------------------------------
+    # Configuration
+    # -------------------------------------------------------------------------
+    "pydantic-settings>=2.14.2", # Env-var-based settings with type validation
+    # -------------------------------------------------------------------------
+    # LLM Integration
+    # -------------------------------------------------------------------------
+    "google-genai>=1.0.0", # Google Gemini SDK (used by router, grader, synthesis)
+    # -------------------------------------------------------------------------
+    # Embedding & Machine Learning
+    # -------------------------------------------------------------------------
+    "sentence-transformers>=3.0.0", # BAAI/bge-m3 multilingual embedding model
+    "numpy>=2.4.6", # Numerical operations (vector math)
+    "torch", # PyTorch backend for sentence-transformers
+    "torchvision", # Required by some torch vision utilities
+    # -------------------------------------------------------------------------
+    # Document Parsing & Chunking
+    # -------------------------------------------------------------------------
+    "docling>=2.0.0", # IBM Docling — PDF/DOCX/PPTX parser with structure awareness
+    "langchain-text-splitters>=0.3.0", # RecursiveCharacterTextSplitter for Option B chunking
+    # -------------------------------------------------------------------------
+    # Token Counting (for chunk size estimation)
+    # -------------------------------------------------------------------------
+    "tiktoken>=0.7.0", # OpenAI BPE tokenizer — used to count tokens per chunk
+    # -------------------------------------------------------------------------
+    # Frontend
+    # -------------------------------------------------------------------------
+    "streamlit>=1.35.0", # Streamlit frontend for the QA demo UI
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+# Pin torch and torchvision to the CPU build to keep Docker image size manageable.
+# GPU support can be added later by switching to a CUDA index URL.
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }

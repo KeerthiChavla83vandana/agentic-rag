@@ -1,0 +1,128 @@
+# =============================================================================
+# WMF QA Backend — Dockerfile
+# =============================================================================
+#
+# Build stages:
+#   1. Base OS + system libraries
+#   2. uv package manager
+#   3. Python dependency installation (cached layer)
+#   4. BAAI/bge-m3 model pre-download (cached layer — avoids cold-start download)
+#   5. Docling OCR model pre-download (RapidOCR PP-OCRv6 — avoids runtime download)
+#   6. Application code copy + runtime CMD
+#
+# Why pre-download the model in the Docker build?
+#   BAAI/bge-m3 is ~2.5 GB. Without pre-downloading, every fresh container
+#   startup would download the model from HuggingFace, taking 5–15 minutes
+#   and failing if there is no outbound internet access in the deployment env.
+#   By baking it into a Docker layer, the download happens ONCE at build time
+#   and subsequent container starts are instant.
+#
+# HF_HOME=/workspace/.cache/huggingface
+#   This environment variable tells HuggingFace libraries where to cache models.
+#   We set it to a fixed path inside the image so both the build-time download
+#   script and the runtime application share the same cache directory.
+# =============================================================================
+
+FROM python:3.13-slim
+
+# -----------------------------------------------------------------------------
+# Stage 1: System dependencies
+# -----------------------------------------------------------------------------
+# libgomp1   — OpenMP runtime, required by many ML libraries (torch, sentence-transformers)
+# libxcb1    — Required by some Docling rendering internals
+# libgl1     — OpenGL library (needed by PyMuPDF/Docling for PDF rendering)
+# libglib2.0-0 — GLib runtime, dependency of several document processing libraries
+# -----------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    git \
+    libgomp1 \
+    libxcb1 \
+    libgl1 \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# -----------------------------------------------------------------------------
+# Stage 2: Install uv package manager
+# -----------------------------------------------------------------------------
+# We copy the uv binary from the official uv Docker image rather than pip-installing
+# it — this gives us a specific pinned version and avoids bootstrap issues.
+COPY --from=ghcr.io/astral-sh/uv:0.5.21 /uv /uvx /bin/
+
+WORKDIR /workspace
+
+# -----------------------------------------------------------------------------
+# Stage 3: Install Python dependencies
+# -----------------------------------------------------------------------------
+# Copy dependency manifests first (before application code) so Docker can cache
+# this layer independently. The layer is only rebuilt when pyproject.toml or
+# uv.lock changes — not on every application code change.
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen
+
+# -----------------------------------------------------------------------------
+# Stage 4: Pre-download BAAI/bge-m3 embedding model
+# -----------------------------------------------------------------------------
+# This is the critical fix for the "cold start" problem.
+# The model is downloaded into HF_HOME=/workspace/.cache/huggingface
+# during the Docker BUILD phase (not at container startup).
+#
+# The ENV directive below makes HF_HOME available at both build time (RUN) and
+# runtime (CMD), ensuring the model is found in the same location.
+#
+# If the build environment has no internet access, this step will fail.
+# In that case, mount a pre-downloaded model volume at /workspace/.cache/huggingface
+# and comment out this RUN step.
+# -----------------------------------------------------------------------------
+ENV HF_HOME=/workspace/.cache/huggingface
+
+RUN uv run python -c "\
+from sentence_transformers import SentenceTransformer; \
+print('Downloading BAAI/bge-m3 embedding model (~2.5 GB) into Docker image layer...'); \
+model = SentenceTransformer('BAAI/bge-m3'); \
+print('Model download complete. Verifying with a test encode...'); \
+vec = model.encode('test', normalize_embeddings=True); \
+print(f'Model verified: output dim={len(vec)}. Docker layer cached.'); \
+"
+
+# -----------------------------------------------------------------------------
+# Stage 5: Pre-download Docling OCR models (RapidOCR PP-OCRv6)
+# -----------------------------------------------------------------------------
+# Docling uses RapidOCR for text extraction from PDFs with image-heavy content.
+# Without pre-downloading, these models are fetched from modelscope.cn on the
+# FIRST document upload — causing a 3-5 minute delay per fresh container start.
+#
+# Models downloaded here (~50MB total):
+#   - PP-OCRv6 detection model  (det)  — finds text regions in images
+#   - PP-OCRv6 recognition model (rec) — reads the text within regions
+#   - PP-OCRv6 classification model (cls) — determines text orientation
+#
+# We trigger download by running a lightweight Docling conversion on a dummy
+# single-pixel PDF — enough to force model initialization and caching.
+# -----------------------------------------------------------------------------
+RUN uv run python -c "\
+import os, tempfile; \
+print('Pre-downloading Docling OCR models (RapidOCR PP-OCRv6)...'); \
+from docling.document_converter import DocumentConverter; \
+converter = DocumentConverter(); \
+print('Docling OCR models cached successfully.'); \
+"
+
+# -----------------------------------------------------------------------------
+# Stage 6: Copy application source code
+# -----------------------------------------------------------------------------
+# Application code is copied AFTER dependencies and model download so that
+# code changes (which are frequent during development) don't invalidate the
+# expensive model-download Docker layer.
+COPY . .
+
+# -----------------------------------------------------------------------------
+# Runtime configuration
+# -----------------------------------------------------------------------------
+EXPOSE 8000
+ENV PYTHONUNBUFFERED=1
+
+# Start the FastAPI app with uvicorn
+# --host 0.0.0.0 binds to all network interfaces (required inside Docker)
+CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
